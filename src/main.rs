@@ -9,7 +9,9 @@ use chrono::Utc;
 
 #[derive(Parser)]
 #[command(name = "rustvector")]
-#[command(about = "🦀 RustVector: Universal Semantic Brain", long_about = None)]
+#[command(version = "0.5.0")]
+#[command(author = "Clawdy <clawdy@openclaw.ai>")]
+#[command(about = "🦀 RustVector: Ultra-lightweight Semantic Brain for Edge Devices", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -19,15 +21,15 @@ struct Cli {
 enum Commands {
     /// Add an entry (auto-embeds text)
     Add { content: String, metadata: String },
-    /// Ingest a folder (auto-embeds every file)
+    /// Ingest a folder recursively (auto-embeds every file)
     Ingest { path: String },
-    /// Semantic search (text-based)
+    /// Semantic search (just pass natural language text)
     Search { query: String, #[arg(default_value_t = 5)] limit: usize },
-    /// View stats
+    /// View total vectors and current provider config
     Stats,
-    /// Wipe the brain
+    /// Wipe the entire brain database
     Purge,
-    /// Configure the embedding provider (Ollama, OpenAI, Gemini)
+    /// Configure embedding provider (ollama, openai, gemini)
     Config { 
         #[arg(short, long)]
         provider: Option<String>,
@@ -84,7 +86,7 @@ fn get_embedding(text: &str, config: &AppConfig) -> Result<Vec<f32>> {
                 .send()?;
             let json: serde_json::Value = res.json()?;
             let emb = json["embedding"].as_array()
-                .ok_or_else(|| anyhow!("Ollama error: Check if model is pulled"))?
+                .ok_or_else(|| anyhow!("Ollama error: Check if model '{}' is pulled", config.model))?
                 .iter().map(|v| v.as_f64().unwrap() as f32).collect();
             Ok(emb)
         },
@@ -100,7 +102,19 @@ fn get_embedding(text: &str, config: &AppConfig) -> Result<Vec<f32>> {
                 .iter().map(|v| v.as_f64().unwrap() as f32).collect();
             Ok(emb)
         },
-        _ => Err(anyhow!("Provider '{}' not supported yet", config.provider)),
+        "gemini" => {
+            let key = config.api_key.as_ref().ok_or_else(|| anyhow!("Gemini key missing"))?;
+            let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:embedContent?key={}", config.model, key);
+            let res = client.post(url)
+                .json(&serde_json::json!({ "content": { "parts": [{ "text": text }] } }))
+                .send()?;
+            let json: serde_json::Value = res.json()?;
+            let emb = json["embedding"]["values"].as_array()
+                .ok_or_else(|| anyhow!("Gemini error: {:?}", json))?
+                .iter().map(|v| v.as_f64().unwrap() as f32).collect();
+            Ok(emb)
+        },
+        _ => Err(anyhow!("Provider '{}' not supported", config.provider)),
     }
 }
 
@@ -137,10 +151,11 @@ fn main() -> Result<()> {
             let mut bytes = Vec::with_capacity(emb.len() * 4);
             for f in emb { bytes.extend_from_slice(&f.to_le_bytes()); }
             conn.execute("INSERT INTO vectors (content, metadata, embedding, timestamp) VALUES (?1, ?2, ?3, ?4)", params![content, metadata, bytes, Utc::now().to_rfc3339()])?;
-            println!("✅ Indexed via {}", config.provider);
+            println!("✅ Content indexed via {}.", config.provider);
         }
         Commands::Ingest { path } => {
             let mut count = 0;
+            println!("🧠 Ingesting: {}", path);
             for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
                 if entry.file_type().is_file() {
                     if let Ok(content) = fs::read_to_string(entry.path()) {
@@ -151,7 +166,7 @@ fn main() -> Result<()> {
                             let meta = format!("{{\"path\": \"{}\"}}", entry.path().display());
                             conn.execute("INSERT INTO vectors (content, metadata, embedding, timestamp) VALUES (?1, ?2, ?3, ?4)", params![content, meta, bytes, Utc::now().to_rfc3339()])?;
                             count += 1;
-                            println!("📖 Ingested: {}", entry.file_name().to_string_lossy());
+                            println!("  + {}", entry.file_name().to_string_lossy());
                         }
                     }
                 }
@@ -179,7 +194,11 @@ fn main() -> Result<()> {
         }
         Commands::Stats => {
             let count: i64 = conn.query_row("SELECT COUNT(*) FROM vectors", [], |r| r.get(0))?;
-            println!("📊 Brain Shards: {}\n🌐 Provider: {}\n🤖 Model: {}", count, config.provider, config.model);
+            println!("📊 RustVector Statistics");
+            println!("Total Vectors: {}", count);
+            println!("Provider:      {}", config.provider);
+            println!("Model:         {}", config.model);
+            println!("DB Path:       {}/.rustvector/vector.db", home);
         }
         Commands::Purge => {
             conn.execute("DELETE FROM vectors", [])?;
