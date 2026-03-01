@@ -1,66 +1,53 @@
-# RustVector 🦀⚡ v0.5.0
+# RustVector 🦀⚡ v0.7.0
 
-**RustVector** is a high-performance, ultra-lightweight standalone vector database engine built for the **Raspberry Pi 5**. It provides a persistent "shared brain" for AI agents and CLI power-users with near-zero overhead.
+**RustVector** is a high-performance, standalone vector database engine built by **Satyaa & Clawdy**. Designed for edge computing on the **Raspberry Pi 5**, it provides a persistent "shared brain" for AI agents with near-zero overhead.
 
 ## 🚀 Key Features
-- **🧠 Multi-Provider Support**: Switch between **Ollama** (Local), **OpenAI**, and **Google Gemini** seamlessly.
-- **🌍 System-Wide Access**: Install once via Cargo and use from any directory or agent session.
-- **📂 Recursive Ingestion**: Index entire project trees or documentation folders in a single command.
-- **💾 Global Persistence**: All agents share the same database at `~/.rustvector/vector.db`.
-- **🛠️ Zero Runtime Bloat**: Pure Rust + SQLite. Runs in **< 1MB RAM**.
+- **🧠 Multi-Provider**: Support for **Ollama** (Local), **OpenAI**, and **Gemini**.
+- **📊 Progress Tracking**: Real-time progress bars for ingestion.
+- **📄 MarkItDown**: Auto-converts PDFs, Office docs, and more via `markitdown`.
+- **🛠️ Management CLI**: New `ls` and `rm` commands to view and manage stored data.
+- **🌍 System-Wide**: Install once via Cargo; share memory across all agent sessions.
 
-## 📦 Installation (The Cargo Way)
-
-To install **RustVector** globally on your system:
+## 📦 Installation
 
 ```bash
+# 1. Install MarkItDown
+pipx install markitdown
+
+# 2. Build and Install RustVector
 git clone https://github.com/CrimsonDevil333333/rustvector.git
 cd rustvector
 cargo install --path .
 ```
 
-## 🛠️ Configuration
+## 📖 Usage Guide
 
-Configure your preferred embedding provider. Settings are persisted in `~/.rustvector/config.json`.
-
+### 1. Configure Brain
 ```bash
-# Use Local Ollama (Default)
-rustvector config --provider ollama --model all-minilm
-
-# Use OpenAI
-rustvector config --provider openai --model text-embedding-3-small --key YOUR_API_KEY
-
-# Use Google Gemini
-rustvector config --provider gemini --model embedding-001 --key YOUR_API_KEY
+rustvector config --provider ollama --model llama3.2:1b
 ```
 
-## 📖 Usage Examples
-
-### 1. Store a Thought
+### 2. Ingest Data (With Progress Bar!)
+Index folders recursively. Non-text files auto-convert.
 ```bash
-rustvector add \"The Pi 5 is my production workhorse.\" '{\"category\": \"infra\"}'
+rustvector ingest /home/pi/workspace/docs
 ```
 
-### 2. Ingest a Project
+### 3. Manage Vectors
+List stored data or delete specific entries:
 ```bash
-rustvector ingest /home/pi/my-cool-project
+# List top 10 entries
+rustvector ls
+
+# Delete entry by ID
+rustvector rm 42
 ```
 
-### 3. Semantic Search
+### 4. Semantic Search
 ```bash
-rustvector search \"What hardware am I using?\" --limit 3
+rustvector search \"How do I configure the firewall?\"
 ```
-
-### 4. Check Brain Stats
-```bash
-rustvector stats
-```
-
-## ✨ Why RustVector?
-Most vector DBs are either heavy (Docker-required) or cloud-only. **RustVector** is built for the **Agentic Era**:
-1. **Agent Interop**: If Agent A learns something, Agent B knows it instantly via the shared CLI.
-2. **Pi-First**: Optimized for ARM64 and low-memory environments.
-3. **Stand-alone**: No daemon, no server, no background processes. Just a binary.
 
 ---
 *Built with 🦀 by Satyaa & Clawdy.*
