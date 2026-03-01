@@ -11,9 +11,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Parser)]
 #[command(name = "rustvector")]
-#[command(version = "1.0.0")]
+#[command(version = "1.1.0")]
 #[command(author = "Satyaa & Clawdy")]
-#[command(about = "🦀 RustVector: Pro-grade semantic brain", long_about = None)]
+#[command(about = "🦀 RustVector: Semantic brain with deduplication and chunking", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -21,29 +21,25 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Add an entry
     Add { content: String, metadata: String },
-    /// Ingest a folder (Delta + Smart Chunking)
     Ingest { path: String },
-    /// Semantic search
     Search { query: String, #[arg(default_value_t = 1)] limit: usize },
-    /// View stats
     Stats,
-    /// Wipe the brain
     Purge,
-    /// Configuration
     Config { 
         #[arg(short, long)] provider: Option<String>,
         #[arg(short, long)] model: Option<String>,
         #[arg(short, long)] key: Option<String>
     },
-    /// List stored data
     Ls { 
         #[arg(short, long, default_value_t = 10)] limit: i64,
         #[arg(short, long, default_value_t = 0)] offset: i64 
     },
-    /// Remove by ID
-    Rm { id: i32 },
+    Rm { 
+        #[arg(short, long)] id: Option<i32>,
+        #[arg(short, long)] path: Option<String>
+    },
+    Clean,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -82,10 +78,7 @@ fn save_config(config: &AppConfig) -> Result<()> {
 }
 
 fn get_embedding(text: &str, config: &AppConfig) -> Result<Vec<f32>> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()?;
-    
+    let client = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(60)).build()?;
     match config.provider.as_str() {
         "ollama" => {
             let res = client.post("http://localhost:11434/api/embeddings")
@@ -93,8 +86,7 @@ fn get_embedding(text: &str, config: &AppConfig) -> Result<Vec<f32>> {
                 .send().map_err(|e| anyhow!("Ollama error: {}", e))?;
             let json: serde_json::Value = res.json()?;
             let emb = json["embedding"].as_array()
-                .ok_or_else(|| anyhow!("Ollama model error"))?
-                .iter().map(|v| v.as_f64().unwrap() as f32).collect();
+                .ok_or_else(|| anyhow!("Ollama model error"))?.iter().map(|v| v.as_f64().unwrap() as f32).collect();
             Ok(emb)
         },
         "openai" => {
@@ -141,8 +133,7 @@ fn main() -> Result<()> {
     let home = env::var("HOME").unwrap_or_else(|_| ".".into());
     let db_dir = format!("{}/.rustvector", home);
     fs::create_dir_all(&db_dir)?;
-    let db_path = format!("{}/vector.db", db_dir);
-    let conn = Connection::open(&db_path)?;
+    let conn = Connection::open(format!("{}/vector.db", db_dir))?;
 
     conn.execute("CREATE TABLE IF NOT EXISTS vectors (id INTEGER PRIMARY KEY, content TEXT NOT NULL, metadata TEXT, embedding BLOB NOT NULL, timestamp TEXT NOT NULL, file_hash TEXT)", [])?;
 
@@ -170,6 +161,8 @@ fn main() -> Result<()> {
             let mut skipped = 0;
             for entry in files {
                 let p = entry.path();
+                let file_name = entry.file_name().to_string_lossy().into_owned();
+                pb.set_message(format!("Checking: {}", file_name));
                 let file_meta = fs::metadata(p)?;
                 let current_hash = format!("{}-{:?}", file_meta.len(), file_meta.modified()?);
                 let path_str = p.to_string_lossy().into_owned();
@@ -199,11 +192,11 @@ fn main() -> Result<()> {
             let q_vec = get_embedding(query, &config)?;
             let mut stmt = conn.prepare("SELECT content, metadata, embedding FROM vectors")?;
             let rows = stmt.query_map([], |row| {
+                let content: String = row.get(0)?;
+                let metadata: String = row.get(1)?;
                 let bytes: Vec<u8> = row.get(2)?;
                 let emb: Vec<f32> = bytes.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
-                let content: String = row.get(0)?;
-                let meta: String = row.get(1)?;
-                Ok((content, meta, emb))
+                Ok((content, metadata, emb))
             })?;
             let mut results = Vec::new();
             for r in rows {
@@ -233,14 +226,22 @@ fn main() -> Result<()> {
             println!("{:<5} | {:<20} | {:<25} | {:<50}", "ID", "Timestamp", "Metadata", "Snippet");
             println!("{}", "-".repeat(110));
             for r in rows {
-                let (id, meta, ts, snip) = r?;
+                let (id, meta, ts, snip): (i32, String, String, String) = r?;
                 println!("{:<5} | {:<20} | {:<25} | {:<50}", id, &ts[..ts.len().min(19)], meta, snip.replace('\n', " "));
             }
         }
-        Commands::Rm { id } => {
-            let deleted = conn.execute("DELETE FROM vectors WHERE id = ?1", params![id])?;
-            if deleted > 0 { println!("✅ Removed ID: {}", id); }
-            else { println!("❌ ID not found."); }
+        Commands::Rm { id, path } => {
+            if let Some(i) = id {
+                conn.execute("DELETE FROM vectors WHERE id = ?1", params![i])?;
+                println!("✅ Removed ID: {}", i);
+            } else if let Some(p) = path {
+                let deleted = conn.execute("DELETE FROM vectors WHERE metadata LIKE ?1", params![format!("%{}%", p)])?;
+                println!("✅ Removed {} entries matching path: {}", deleted, p);
+            } else { println!("❌ Specify --id or --path."); }
+        }
+        Commands::Clean => {
+            let deleted = conn.execute("DELETE FROM vectors WHERE id NOT IN (SELECT MIN(id) FROM vectors GROUP BY content, metadata)", [])?;
+            println!("🧹 Removed {} duplicates.", deleted);
         }
     }
     Ok(())
