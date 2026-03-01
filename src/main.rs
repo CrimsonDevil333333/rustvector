@@ -11,9 +11,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Parser)]
 #[command(name = "rustvector")]
-#[command(version = "0.9.0")]
+#[command(version = "1.0.0")]
 #[command(author = "Satyaa & Clawdy")]
-#[command(about = "🦀 RustVector: Semantic brain with delta indexing and smart chunking", long_about = None)]
+#[command(about = "🦀 RustVector: Pro-grade semantic brain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -21,28 +21,28 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Add an entry (auto-embeds text)
+    /// Add an entry
     Add { content: String, metadata: String },
-    /// Ingest a folder recursively (Delta mode: skips unchanged files)
+    /// Ingest a folder (Delta + Smart Chunking)
     Ingest { path: String },
-    /// Semantic search (text-based)
-    Search { query: String, #[arg(default_value_t = 5)] limit: usize },
+    /// Semantic search
+    Search { query: String, #[arg(default_value_t = 1)] limit: usize },
     /// View stats
     Stats,
     /// Wipe the brain
     Purge,
-    /// Quick configuration
+    /// Configuration
     Config { 
         #[arg(short, long)] provider: Option<String>,
         #[arg(short, long)] model: Option<String>,
         #[arg(short, long)] key: Option<String>
     },
-    /// List all stored vectors
+    /// List stored data
     Ls { 
         #[arg(short, long, default_value_t = 10)] limit: i64,
         #[arg(short, long, default_value_t = 0)] offset: i64 
     },
-    /// Remove a specific vector by ID
+    /// Remove by ID
     Rm { id: i32 },
 }
 
@@ -90,10 +90,10 @@ fn get_embedding(text: &str, config: &AppConfig) -> Result<Vec<f32>> {
         "ollama" => {
             let res = client.post("http://localhost:11434/api/embeddings")
                 .json(&serde_json::json!({ "model": config.model, "prompt": text }))
-                .send().map_err(|e| anyhow!("Ollama connection error: {}", e))?;
+                .send().map_err(|e| anyhow!("Ollama error: {}", e))?;
             let json: serde_json::Value = res.json()?;
             let emb = json["embedding"].as_array()
-                .ok_or_else(|| anyhow!("Ollama model error: check if model supports embeddings"))?
+                .ok_or_else(|| anyhow!("Ollama model error"))?
                 .iter().map(|v| v.as_f64().unwrap() as f32).collect();
             Ok(emb)
         },
@@ -105,10 +105,10 @@ fn get_embedding(text: &str, config: &AppConfig) -> Result<Vec<f32>> {
                 .send()?;
             let json: serde_json::Value = res.json()?;
             let emb = json["data"][0]["embedding"].as_array()
-                .ok_or_else(|| anyhow!("OpenAI API error"))?.iter().map(|v| v.as_f64().unwrap() as f32).collect();
+                .ok_or_else(|| anyhow!("OpenAI error"))?.iter().map(|v| v.as_f64().unwrap() as f32).collect();
             Ok(emb)
         },
-        _ => Err(anyhow!("Provider not supported")),
+        _ => Err(anyhow!("Provider unsupported")),
     }
 }
 
@@ -116,7 +116,6 @@ fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
     let words: Vec<&str> = text.split_whitespace().collect();
     let mut chunks = Vec::new();
     if words.is_empty() { return chunks; }
-    
     let mut start = 0;
     while start < words.len() {
         let end = std::cmp::min(start + chunk_size, words.len());
@@ -141,26 +140,11 @@ fn main() -> Result<()> {
     let config = load_config();
     let home = env::var("HOME").unwrap_or_else(|_| ".".into());
     let db_dir = format!("{}/.rustvector", home);
-    fs::create_dir_all(&db_dir)?; // This should be db_dir, but dir was locally scoped before. Home scope is db_dir.
+    fs::create_dir_all(&db_dir)?;
     let db_path = format!("{}/vector.db", db_dir);
     let conn = Connection::open(&db_path)?;
 
-    conn.execute("CREATE TABLE IF NOT EXISTS vectors (
-        id INTEGER PRIMARY KEY, 
-        content TEXT NOT NULL, 
-        metadata TEXT, 
-        embedding BLOB NOT NULL, 
-        timestamp TEXT NOT NULL
-    )", [])?;
-
-    // Delta Migration
-    let has_hash_col: bool = conn.prepare("PRAGMA table_info(vectors)")?
-        .query_map([], |row| row.get::<usize, String>(1))?
-        .filter_map(|r| r.ok())
-        .any(|n| n == "file_hash");
-    if !has_hash_col {
-        conn.execute("ALTER TABLE vectors ADD COLUMN file_hash TEXT", [])?;
-    }
+    conn.execute("CREATE TABLE IF NOT EXISTS vectors (id INTEGER PRIMARY KEY, content TEXT NOT NULL, metadata TEXT, embedding BLOB NOT NULL, timestamp TEXT NOT NULL, file_hash TEXT)", [])?;
 
     match &cli.command {
         Commands::Config { provider, model, key } => {
@@ -176,46 +160,23 @@ fn main() -> Result<()> {
             let mut bytes = Vec::with_capacity(emb.len() * 4);
             for f in emb { bytes.extend_from_slice(&f.to_le_bytes()); }
             conn.execute("INSERT INTO vectors (content, metadata, embedding, timestamp) VALUES (?1, ?2, ?3, ?4)", params![content, metadata, bytes, Utc::now().to_rfc3339()])?;
-            println!("✅ Fact indexed.");
+            println!("✅ Indexed.");
         }
         Commands::Ingest { path } => {
             let files: Vec<_> = WalkDir::new(path).into_iter().filter_map(|e| e.ok()).filter(|e| e.file_type().is_file()).collect();
             let pb = ProgressBar::new(files.len() as u64);
-            pb.set_style(ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")?
-                .progress_chars("#>-"));
-
+            pb.set_style(ProgressStyle::default_bar().template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}")?.progress_chars("#>-"));
             let mut indexed = 0;
             let mut skipped = 0;
-
             for entry in files {
                 let p = entry.path();
-                let file_name = entry.file_name().to_string_lossy().into_owned();
-                pb.set_message(format!("Checking: {}", file_name));
-                
                 let file_meta = fs::metadata(p)?;
                 let current_hash = format!("{}-{:?}", file_meta.len(), file_meta.modified()?);
                 let path_str = p.to_string_lossy().into_owned();
-                
-                let already_exists: bool = conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM vectors WHERE file_hash = ?1 AND metadata LIKE ?2)",
-                    params![current_hash, format!("%{}%", path_str)],
-                    |row| row.get(0)
-                ).unwrap_or(false);
-
-                if already_exists {
-                    skipped += 1;
-                    pb.inc(1);
-                    continue;
-                }
-
-                let content = if p.extension().map_or(false, |ext| ext == "md" || ext == "txt") {
-                    fs::read_to_string(p).ok()
-                } else {
-                    Command::new("markitdown").arg(p).output().ok()
-                        .and_then(|o| String::from_utf8(o.stdout).ok())
-                };
-
+                let already_exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM vectors WHERE file_hash = ?1 AND metadata LIKE ?2)", params![current_hash, format!("%{}%", path_str)], |row| row.get(0)).unwrap_or(false);
+                if already_exists { skipped += 1; pb.inc(1); continue; }
+                pb.set_message(format!("Indexing: {}", entry.file_name().to_string_lossy()));
+                let content = if p.extension().map_or(false, |ext| ext == "md" || ext == "txt") { fs::read_to_string(p).ok() } else { Command::new("markitdown").arg(p).output().ok().and_then(|o| String::from_utf8(o.stdout).ok()) };
                 if let Some(txt) = content {
                     if !txt.is_empty() {
                         let chunks = chunk_text(&txt, 500, 50);
@@ -224,10 +185,7 @@ fn main() -> Result<()> {
                             if let Ok(emb) = get_embedding(chunk, &config) {
                                 let mut b = Vec::with_capacity(emb.len() * 4);
                                 for f in emb { b.extend_from_slice(&f.to_le_bytes()); }
-                                let _ = conn.execute(
-                                    "INSERT INTO vectors (content, metadata, embedding, timestamp, file_hash) VALUES (?1, ?2, ?3, ?4, ?5)", 
-                                    params![chunk, format!("{{\"path\": \"{}\", \"chunk\": {}}}", path_str, i), b, Utc::now().to_rfc3339(), current_hash]
-                                );
+                                let _ = conn.execute("INSERT INTO vectors (content, metadata, embedding, timestamp, file_hash) VALUES (?1, ?2, ?3, ?4, ?5)", params![chunk, format!("{{\"path\": \"{}\", \"chunk\": {}}}", path_str, i), b, Utc::now().to_rfc3339(), current_hash]);
                             }
                         }
                         indexed += 1;
@@ -235,7 +193,7 @@ fn main() -> Result<()> {
                 }
                 pb.inc(1);
             }
-            pb.finish_with_message(format!("✅ Done. Indexed: {}, Skipped: {}", indexed, skipped));
+            pb.finish_with_message(format!("✅ Indexed: {}, Skipped: {}", indexed, skipped));
         }
         Commands::Search { query, limit } => {
             let q_vec = get_embedding(query, &config)?;
@@ -260,15 +218,9 @@ fn main() -> Result<()> {
         }
         Commands::Stats => {
             let count: i64 = conn.query_row("SELECT COUNT(*) FROM vectors", [], |r| r.get(0))?;
-            println!("📊 RustVector Stats");
-            println!("Total vectors: {}", count);
-            println!("Provider:      {}", config.provider);
-            println!("Model:         {}", config.model);
+            println!("📊 RustVector Stats\nTotal vectors: {}\nProvider:      {}\nModel:         {}", count, config.provider, config.model);
         }
-        Commands::Purge => {
-            conn.execute("DELETE FROM vectors", [])?;
-            println!("🗑️ Brain wiped.");
-        }
+        Commands::Purge => { conn.execute("DELETE FROM vectors", [])?; println!("🗑️ Brain wiped."); }
         Commands::Ls { limit, offset } => {
             let mut stmt = conn.prepare("SELECT id, metadata, timestamp, substr(content, 1, 50) FROM vectors LIMIT ?1 OFFSET ?2")?;
             let rows = stmt.query_map(params![limit, offset], |row| {
