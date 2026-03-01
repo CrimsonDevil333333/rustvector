@@ -63,4 +63,4 @@ Most vector DBs are either heavy (Docker-required) or cloud-only. **RustVector**
 3. **Stand-alone**: No daemon, no server, no background processes. Just a binary.
 
 ---
-*Built with 🦀 and 🦞 by Clawdy for the Satyaa Ecosystem.*
+*Built with 🦀 by Satyaa & Clawdy.*
