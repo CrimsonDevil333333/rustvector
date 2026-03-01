@@ -1,18 +1,18 @@
-# RustVector 🦀⚡ v0.7.0
+# RustVector 🦀⚡ v1.0.0
 
-**RustVector** is a high-performance, standalone vector database engine built by **Satyaa & Clawdy**. Designed for edge computing on the **Raspberry Pi 5**, it provides a persistent "shared brain" for AI agents with near-zero overhead.
+**RustVector** is a pro-grade, standalone vector database engine built by **Satyaa & Clawdy**. Optimized for the **Raspberry Pi 5**, it provides a high-precision semantic memory for AI agents with negligible resource impact.
 
 ## 🚀 Key Features
-- **🧠 Multi-Provider**: Support for **Ollama** (Local), **OpenAI**, and **Gemini**.
-- **📊 Progress Tracking**: Real-time progress bars for ingestion.
-- **📄 MarkItDown**: Auto-converts PDFs, Office docs, and more via `markitdown`.
-- **🛠️ Management CLI**: New `ls` and `rm` commands to view and manage stored data.
-- **🌍 System-Wide**: Install once via Cargo; share memory across all agent sessions.
+- **🧠 Intelligent Chunking**: Uses a sliding window (500 words, 50 overlap) to maintain semantic accuracy across large files.
+- **⚡ Delta Indexing**: Automatic file-hash tracking. It only re-embeds what has actually changed.
+- **📄 Universal Ingestion**: Markdown/TXT native support + automatic PDF/Office conversion via \`markitdown\`.
+- **🌍 System-Wide Access**: Install via Cargo and share one global brain across all your agent sessions.
+- **📊 Management Console**: Professional CLI with \`ls\`, \`rm\`, \`stats\`, and \`purge\` commands.
 
-## 📦 Installation
+## 📦 One-Command Install
 
 ```bash
-# 1. Install MarkItDown
+# 1. Install doc conversion (Optional)
 pipx install markitdown
 
 # 2. Build and Install RustVector
@@ -21,33 +21,38 @@ cd rustvector
 cargo install --path .
 ```
 
-## 📖 Usage Guide
+## 📖 Usage Examples
 
-### 1. Configure Brain
+### 1. Smart Search (1-Line Default)
+The search now defaults to the most relevant single result for a clean terminal experience.
+```bash
+rustvector search "How do I secure the Pi 5?"
+```
+
+### 2. Delta Ingestion (Incremental)
+Index thousands of files. If you run it again, it skips everything already indexed.
+```bash
+rustvector ingest /home/pi/.openclaw/workspace/memory
+```
+
+### 3. Manage the Brain
+View your stored knowledge shards or delete specific ones.
+```bash
+rustvector ls --limit 20
+rustvector rm 42
+```
+
+### 4. Configuration
+Switch between local and cloud providers instantly.
 ```bash
 rustvector config --provider ollama --model llama3.2:1b
 ```
 
-### 2. Ingest Data (With Progress Bar!)
-Index folders recursively. Non-text files auto-convert.
-```bash
-rustvector ingest /home/pi/workspace/docs
-```
-
-### 3. Manage Vectors
-List stored data or delete specific entries:
-```bash
-# List top 10 entries
-rustvector ls
-
-# Delete entry by ID
-rustvector rm 42
-```
-
-### 4. Semantic Search
-```bash
-rustvector search \"How do I configure the firewall?\"
-```
+## ✨ Technical Spec
+- **Architecture**: Pure Rust 🦀 + SQLite (Raw BLOBs).
+- **RAM Usage**: < 1MB (Idle/Search).
+- **Search**: Native Cosine Similarity with normalization.
+- **Chunking**: Overlapping sliding window for context preservation.
 
 ---
 *Built with 🦀 by Satyaa & Clawdy.*
