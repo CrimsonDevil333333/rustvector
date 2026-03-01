@@ -11,9 +11,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Parser)]
 #[command(name = "rustvector")]
-#[command(version = "0.8.2")]
+#[command(version = "0.9.0")]
 #[command(author = "Satyaa & Clawdy")]
-#[command(about = "🦀 RustVector: High-performance semantic brain with delta indexing", long_about = None)]
+#[command(about = "🦀 RustVector: Semantic brain with delta indexing and smart chunking", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -83,17 +83,17 @@ fn save_config(config: &AppConfig) -> Result<()> {
 
 fn get_embedding(text: &str, config: &AppConfig) -> Result<Vec<f32>> {
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(60)) // Increased timeout for heavy loads
+        .timeout(std::time::Duration::from_secs(60))
         .build()?;
     
     match config.provider.as_str() {
         "ollama" => {
             let res = client.post("http://localhost:11434/api/embeddings")
                 .json(&serde_json::json!({ "model": config.model, "prompt": text }))
-                .send().map_err(|e| anyhow!("Ollama connection error (is Ollama overloaded?): {}", e))?;
+                .send().map_err(|e| anyhow!("Ollama connection error: {}", e))?;
             let json: serde_json::Value = res.json()?;
             let emb = json["embedding"].as_array()
-                .ok_or_else(|| anyhow!("Ollama model error: check if model is correct and supports embeddings"))?
+                .ok_or_else(|| anyhow!("Ollama model error: check if model supports embeddings"))?
                 .iter().map(|v| v.as_f64().unwrap() as f32).collect();
             Ok(emb)
         },
@@ -112,6 +112,21 @@ fn get_embedding(text: &str, config: &AppConfig) -> Result<Vec<f32>> {
     }
 }
 
+fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let mut chunks = Vec::new();
+    if words.is_empty() { return chunks; }
+    
+    let mut start = 0;
+    while start < words.len() {
+        let end = std::cmp::min(start + chunk_size, words.len());
+        chunks.push(words[start..end].join(" "));
+        if end == words.len() { break; }
+        start += chunk_size - overlap;
+    }
+    chunks
+}
+
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() { return 0.0; }
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
@@ -126,11 +141,10 @@ fn main() -> Result<()> {
     let config = load_config();
     let home = env::var("HOME").unwrap_or_else(|_| ".".into());
     let db_dir = format!("{}/.rustvector", home);
-    fs::create_dir_all(&db_dir)?;
+    fs::create_dir_all(&db_dir)?; // This should be db_dir, but dir was locally scoped before. Home scope is db_dir.
     let db_path = format!("{}/vector.db", db_dir);
     let conn = Connection::open(&db_path)?;
 
-    // Ensure schema is up to date
     conn.execute("CREATE TABLE IF NOT EXISTS vectors (
         id INTEGER PRIMARY KEY, 
         content TEXT NOT NULL, 
@@ -139,11 +153,11 @@ fn main() -> Result<()> {
         timestamp TEXT NOT NULL
     )", [])?;
 
-    // Delta Migration: Check if file_hash exists
+    // Delta Migration
     let has_hash_col: bool = conn.prepare("PRAGMA table_info(vectors)")?
-        .query_map([], |row| Ok(row.get::<usize, String>(1)?))?
-        .any(|name| name.map_or(false, |n| n == "file_hash"));
-
+        .query_map([], |row| row.get::<usize, String>(1))?
+        .filter_map(|r| r.ok())
+        .any(|n| n == "file_hash");
     if !has_hash_col {
         conn.execute("ALTER TABLE vectors ADD COLUMN file_hash TEXT", [])?;
     }
@@ -157,7 +171,7 @@ fn main() -> Result<()> {
             save_config(&new_config)?;
             println!("✅ Config updated.");
         }
-        Commands::Add { content, metadata, .. } => {
+        Commands::Add { content, metadata } => {
             let emb = get_embedding(content, &config)?;
             let mut bytes = Vec::with_capacity(emb.len() * 4);
             for f in emb { bytes.extend_from_slice(&f.to_le_bytes()); }
@@ -203,17 +217,20 @@ fn main() -> Result<()> {
                 };
 
                 if let Some(txt) = content {
-                    if !txt.is_empty() && txt.len() < 250000 {
-                        if let Ok(emb) = get_embedding(&txt, &config) {
-                            let mut b = Vec::with_capacity(emb.len() * 4);
-                            for f in emb { b.extend_from_slice(&f.to_le_bytes()); }
-                            conn.execute("DELETE FROM vectors WHERE metadata LIKE ?1", params![format!("%{}%", path_str)])?;
-                            conn.execute(
-                                "INSERT INTO vectors (content, metadata, embedding, timestamp, file_hash) VALUES (?1, ?2, ?3, ?4, ?5)", 
-                                params![txt, format!("{{\"path\": \"{}\"}}", path_str), b, Utc::now().to_rfc3339(), current_hash]
-                            )?;
-                            indexed += 1;
+                    if !txt.is_empty() {
+                        let chunks = chunk_text(&txt, 500, 50);
+                        conn.execute("DELETE FROM vectors WHERE metadata LIKE ?1", params![format!("%{}%", path_str)])?;
+                        for (i, chunk) in chunks.iter().enumerate() {
+                            if let Ok(emb) = get_embedding(chunk, &config) {
+                                let mut b = Vec::with_capacity(emb.len() * 4);
+                                for f in emb { b.extend_from_slice(&f.to_le_bytes()); }
+                                let _ = conn.execute(
+                                    "INSERT INTO vectors (content, metadata, embedding, timestamp, file_hash) VALUES (?1, ?2, ?3, ?4, ?5)", 
+                                    params![chunk, format!("{{\"path\": \"{}\", \"chunk\": {}}}", path_str, i), b, Utc::now().to_rfc3339(), current_hash]
+                                );
+                            }
                         }
+                        indexed += 1;
                     }
                 }
                 pb.inc(1);
@@ -237,7 +254,7 @@ fn main() -> Result<()> {
             }
             results.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
             for (c, m, s) in results.iter().take(*limit) {
-                let preview = if c.len() > 120 { &c[..120] } else { &c };
+                let preview = if c.len() > 150 { &c[..150] } else { &c };
                 println!("[{:.2}% match] {}\nPreview: {}\n", s * 100.0, m, preview.replace('\n', " "));
             }
         }
@@ -255,7 +272,11 @@ fn main() -> Result<()> {
         Commands::Ls { limit, offset } => {
             let mut stmt = conn.prepare("SELECT id, metadata, timestamp, substr(content, 1, 50) FROM vectors LIMIT ?1 OFFSET ?2")?;
             let rows = stmt.query_map(params![limit, offset], |row| {
-                Ok((row.get::<usize, i32>(0)?, row.get::<usize, String>(1)?, row.get::<usize, String>(2)?, row.get::<usize, String>(3)?))
+                let id: i32 = row.get(0)?;
+                let meta: String = row.get(1)?;
+                let ts: String = row.get(2)?;
+                let snip: String = row.get(3)?;
+                Ok((id, meta, ts, snip))
             })?;
             println!("{:<5} | {:<20} | {:<25} | {:<50}", "ID", "Timestamp", "Metadata", "Snippet");
             println!("{}", "-".repeat(110));
