@@ -11,7 +11,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Parser)]
 #[command(name = "rustvector")]
-#[command(version = "0.8.1")]
+#[command(version = "0.8.2")]
 #[command(author = "Satyaa & Clawdy")]
 #[command(about = "🦀 RustVector: High-performance semantic brain with delta indexing", long_about = None)]
 struct Cli {
@@ -83,17 +83,17 @@ fn save_config(config: &AppConfig) -> Result<()> {
 
 fn get_embedding(text: &str, config: &AppConfig) -> Result<Vec<f32>> {
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(60)) // Increased timeout for heavy loads
         .build()?;
     
     match config.provider.as_str() {
         "ollama" => {
             let res = client.post("http://localhost:11434/api/embeddings")
                 .json(&serde_json::json!({ "model": config.model, "prompt": text }))
-                .send().map_err(|e| anyhow!("Ollama connection error: {}", e))?;
+                .send().map_err(|e| anyhow!("Ollama connection error (is Ollama overloaded?): {}", e))?;
             let json: serde_json::Value = res.json()?;
             let emb = json["embedding"].as_array()
-                .ok_or_else(|| anyhow!("Ollama model error: model not found?"))?
+                .ok_or_else(|| anyhow!("Ollama model error: check if model is correct and supports embeddings"))?
                 .iter().map(|v| v.as_f64().unwrap() as f32).collect();
             Ok(emb)
         },
@@ -141,7 +141,7 @@ fn main() -> Result<()> {
 
     // Delta Migration: Check if file_hash exists
     let has_hash_col: bool = conn.prepare("PRAGMA table_info(vectors)")?
-        .query_map([], |row| Ok(row.get::<_, String>(1)?))?
+        .query_map([], |row| Ok(row.get::<usize, String>(1)?))?
         .any(|name| name.map_or(false, |n| n == "file_hash"));
 
     if !has_hash_col {
@@ -255,7 +255,7 @@ fn main() -> Result<()> {
         Commands::Ls { limit, offset } => {
             let mut stmt = conn.prepare("SELECT id, metadata, timestamp, substr(content, 1, 50) FROM vectors LIMIT ?1 OFFSET ?2")?;
             let rows = stmt.query_map(params![limit, offset], |row| {
-                Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?))
+                Ok((row.get::<usize, i32>(0)?, row.get::<usize, String>(1)?, row.get::<usize, String>(2)?, row.get::<usize, String>(3)?))
             })?;
             println!("{:<5} | {:<20} | {:<25} | {:<50}", "ID", "Timestamp", "Metadata", "Snippet");
             println!("{}", "-".repeat(110));
