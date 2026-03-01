@@ -2,16 +2,18 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
+use std::process::Command;
 use clap::{Parser, Subcommand};
 use walkdir::WalkDir;
 use anyhow::{Result, anyhow};
 use chrono::Utc;
+use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Parser)]
 #[command(name = "rustvector")]
-#[command(version = "0.5.0")]
-#[command(author = "Clawdy <clawdy@openclaw.ai>")]
-#[command(about = "🦀 RustVector: Ultra-lightweight Semantic Brain for Edge Devices", long_about = None)]
+#[command(version = "0.6.0")]
+#[command(author = "Satyaa & Clawdy")]
+#[command(about = "🦀 RustVector: High-performance semantic brain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -21,22 +23,19 @@ struct Cli {
 enum Commands {
     /// Add an entry (auto-embeds text)
     Add { content: String, metadata: String },
-    /// Ingest a folder recursively (auto-embeds every file)
+    /// Ingest a folder recursively (auto-converts non-MD via markitdown)
     Ingest { path: String },
-    /// Semantic search (just pass natural language text)
+    /// Semantic search (text-based)
     Search { query: String, #[arg(default_value_t = 5)] limit: usize },
-    /// View total vectors and current provider config
+    /// View stats
     Stats,
-    /// Wipe the entire brain database
+    /// Wipe the brain
     Purge,
-    /// Configure embedding provider (ollama, openai, gemini)
+    /// Quick configuration
     Config { 
-        #[arg(short, long)]
-        provider: Option<String>,
-        #[arg(short, long)]
-        model: Option<String>,
-        #[arg(short, long)]
-        key: Option<String>
+        #[arg(short, long)] provider: Option<String>,
+        #[arg(short, long)] model: Option<String>,
+        #[arg(short, long)] key: Option<String>
     },
 }
 
@@ -51,7 +50,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             provider: "ollama".into(),
-            model: "all-minilm".into(),
+            model: "llama3.2:1b".into(),
             api_key: None,
         }
     }
@@ -71,22 +70,23 @@ fn save_config(config: &AppConfig) -> Result<()> {
     let home = env::var("HOME").unwrap_or_else(|_| ".".into());
     let dir = format!("{}/.rustvector", home);
     fs::create_dir_all(&dir)?;
-    let data = serde_json::to_string_pretty(config)?;
-    fs::write(format!("{}/config.json", dir), data)?;
+    fs::write(format!("{}/config.json", dir), serde_json::to_string_pretty(config)?)?;
     Ok(())
 }
 
 fn get_embedding(text: &str, config: &AppConfig) -> Result<Vec<f32>> {
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
     
     match config.provider.as_str() {
         "ollama" => {
             let res = client.post("http://localhost:11434/api/embeddings")
                 .json(&serde_json::json!({ "model": config.model, "prompt": text }))
-                .send()?;
+                .send().map_err(|e| anyhow!("Ollama Offline? {}", e))?;
             let json: serde_json::Value = res.json()?;
             let emb = json["embedding"].as_array()
-                .ok_or_else(|| anyhow!("Ollama error: Check if model '{}' is pulled", config.model))?
+                .ok_or_else(|| anyhow!("Ollama error: {:?}", json))?
                 .iter().map(|v| v.as_f64().unwrap() as f32).collect();
             Ok(emb)
         },
@@ -98,33 +98,11 @@ fn get_embedding(text: &str, config: &AppConfig) -> Result<Vec<f32>> {
                 .send()?;
             let json: serde_json::Value = res.json()?;
             let emb = json["data"][0]["embedding"].as_array()
-                .ok_or_else(|| anyhow!("OpenAI error: {:?}", json))?
-                .iter().map(|v| v.as_f64().unwrap() as f32).collect();
+                .ok_or_else(|| anyhow!("OpenAI error"))?.iter().map(|v| v.as_f64().unwrap() as f32).collect();
             Ok(emb)
         },
-        "gemini" => {
-            let key = config.api_key.as_ref().ok_or_else(|| anyhow!("Gemini key missing"))?;
-            let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:embedContent?key={}", config.model, key);
-            let res = client.post(url)
-                .json(&serde_json::json!({ "content": { "parts": [{ "text": text }] } }))
-                .send()?;
-            let json: serde_json::Value = res.json()?;
-            let emb = json["embedding"]["values"].as_array()
-                .ok_or_else(|| anyhow!("Gemini error: {:?}", json))?
-                .iter().map(|v| v.as_f64().unwrap() as f32).collect();
-            Ok(emb)
-        },
-        _ => Err(anyhow!("Provider '{}' not supported", config.provider)),
+        _ => Err(anyhow!("Provider unsupported")),
     }
-}
-
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() { return 0.0; }
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 { return 0.0; }
-    dot / (norm_a * norm_b)
 }
 
 fn main() -> Result<()> {
@@ -144,34 +122,46 @@ fn main() -> Result<()> {
             if let Some(m) = model { new_config.model = m.clone(); }
             if let Some(k) = key { new_config.api_key = Some(k.clone()); }
             save_config(&new_config)?;
-            println!("✅ Config updated: {} using model {}", new_config.provider, new_config.model);
+            println!("✅ Config saved to ~/.rustvector/config.json");
         }
         Commands::Add { content, metadata } => {
             let emb = get_embedding(content, &config)?;
             let mut bytes = Vec::with_capacity(emb.len() * 4);
             for f in emb { bytes.extend_from_slice(&f.to_le_bytes()); }
             conn.execute("INSERT INTO vectors (content, metadata, embedding, timestamp) VALUES (?1, ?2, ?3, ?4)", params![content, metadata, bytes, Utc::now().to_rfc3339()])?;
-            println!("✅ Content indexed via {}.", config.provider);
+            println!("✅ Indexed.");
         }
         Commands::Ingest { path } => {
-            let mut count = 0;
-            println!("🧠 Ingesting: {}", path);
-            for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
-                if entry.file_type().is_file() {
-                    if let Ok(content) = fs::read_to_string(entry.path()) {
-                        if content.len() > 100000 || content.contains('\0') { continue; }
-                        if let Ok(emb) = get_embedding(&content, &config) {
+            let files: Vec<_> = WalkDir::new(path).into_iter().filter_map(|e| e.ok()).filter(|e| e.file_type().is_file()).collect();
+            let pb = ProgressBar::new(files.len() as u64);
+            pb.set_style(ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")?
+                .progress_chars("#>-"));
+
+            for entry in files {
+                let p = entry.path();
+                pb.set_message(format!("Indexing: {}", entry.file_name().to_string_lossy()));
+                
+                let content = if p.extension().map_or(false, |ext| ext == "md" || ext == "txt") {
+                    fs::read_to_string(p).ok()
+                } else {
+                    let output = Command::new("markitdown").arg(p).output();
+                    output.ok().and_then(|o| String::from_utf8(o.stdout).ok())
+                };
+
+                if let Some(txt) = content {
+                    if txt.len() > 0 && txt.len() < 200000 {
+                        if let Ok(emb) = get_embedding(&txt, &config) {
                             let mut bytes = Vec::with_capacity(emb.len() * 4);
                             for f in emb { bytes.extend_from_slice(&f.to_le_bytes()); }
-                            let meta = format!("{{\"path\": \"{}\"}}", entry.path().display());
-                            conn.execute("INSERT INTO vectors (content, metadata, embedding, timestamp) VALUES (?1, ?2, ?3, ?4)", params![content, meta, bytes, Utc::now().to_rfc3339()])?;
-                            count += 1;
-                            println!("  + {}", entry.file_name().to_string_lossy());
+                            let _ = conn.execute("INSERT INTO vectors (content, metadata, embedding, timestamp) VALUES (?1, ?2, ?3, ?4)", 
+                                params![txt, format!("{{\"path\": \"{}\"}}", p.display()), bytes, Utc::now().to_rfc3339()]);
                         }
                     }
                 }
+                pb.inc(1);
             }
-            println!("✅ Successfully indexed {} files.", count);
+            pb.finish_with_message("✅ Ingestion complete");
         }
         Commands::Search { query, limit } => {
             let query_vec = get_embedding(query, &config)?;
@@ -187,23 +177,15 @@ fn main() -> Result<()> {
                 results.push((content, meta, cosine_similarity(&query_vec, &emb), ts));
             }
             results.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-            println!("--- Top {} Matches (via {}) ---", limit, config.provider);
-            for (content, meta, score, ts) in results.iter().take(*limit) {
-                println!("[Relevance: {:.2}%] [At: {}]\nMeta: {}\nContent: {}...\n", score * 100.0, ts, meta, &content[..content.len().min(150)].replace('\n', " "));
+            for (content, meta, score, _) in results.iter().take(*limit) {
+                println!("[{:.2}%] {}\n{}\n", score * 100.0, meta, &content[..content.len().min(120)].replace('\n', " "));
             }
         }
         Commands::Stats => {
             let count: i64 = conn.query_row("SELECT COUNT(*) FROM vectors", [], |r| r.get(0))?;
-            println!("📊 RustVector Statistics");
-            println!("Total Vectors: {}", count);
-            println!("Provider:      {}", config.provider);
-            println!("Model:         {}", config.model);
-            println!("DB Path:       {}/.rustvector/vector.db", home);
+            println!("📊 Brain: {} vectors | Provider: {} | Model: {}", count, config.provider, config.model);
         }
-        Commands::Purge => {
-            conn.execute("DELETE FROM vectors", [])?;
-            println!("🗑️ Brain wiped.");
-        }
+        Commands::Purge => { conn.execute("DELETE FROM vectors", [])?; println!("🗑️ Wiped."); }
     }
     Ok(())
 }
