@@ -1,6 +1,9 @@
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::fs;
+use std::path::Path;
+use anyhow::Context;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct VectorEntry {
@@ -11,16 +14,18 @@ struct VectorEntry {
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * b_f32(y)).sum();
-    dot_product // Assuming normalized vectors for simplicity in this MVP
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
-
-// Helper to handle byte conversion
-fn b_f32(val: &f32) -> f32 { *val }
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().collect();
-    let db_path = "vector.db";
+    
+    // Use a fixed path in home dir for global persistence, or local if specified
+    let home = env::var("HOME").unwrap_or_else(|_| ".".into());
+    let db_dir = format!("{}/.rustvector", home);
+    fs::create_dir_all(&db_dir)?;
+    let db_path = format!("{}/vector.db", db_dir);
+    
     let conn = Connection::open(db_path)?;
 
     conn.execute(
@@ -34,8 +39,11 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     if args.len() < 2 {
-        println!("Usage: rustvector <command> [args]");
-        println!("Commands: add <content> <metadata_json> <embedding_csv>, search <query_embedding_csv>");
+        println!("RustVector 🦀⚡");
+        println!("Usage:");
+        println!("  rustvector add <content> <metadata> <embeddings_csv>");
+        println!("  rustvector ingest <folder_path> <embeddings_csv_for_all_files>");
+        println!("  rustvector search <query_embeddings_csv>");
         return Ok(());
     }
 
@@ -43,49 +51,61 @@ fn main() -> anyhow::Result<()> {
         "add" => {
             let content = &args[2];
             let metadata = &args[3];
-            let embedding_str = &args[4];
-            let embedding: Vec<f32> = embedding_str.split(',')
-                .map(|s| s.parse().unwrap())
-                .collect();
-            let mut embedding_bytes = Vec::with_capacity(embedding.len() * 4);
-            for f in embedding {
-                embedding_bytes.extend_from_slice(&f.to_le_bytes());
-            }
+            let emb_str = &args[4];
+            let emb: Vec<f32> = emb_str.split(',').map(|s| s.parse().unwrap_or(0.0)).collect();
+            let mut bytes = Vec::with_capacity(emb.len() * 4);
+            for f in emb { bytes.extend_from_slice(&f.to_le_bytes()); }
+            
             conn.execute(
                 "INSERT INTO vectors (content, metadata, embedding) VALUES (?1, ?2, ?3)",
-                params![content, metadata, embedding_bytes],
+                params![content, metadata, bytes],
             )?;
-            println!("Added entry.");
+            println!("✅ Added entry.");
+        }
+        "ingest" => {
+            let path = Path::new(&args[2]);
+            let emb_str = &args[3]; // Placeholder: real version would call an embedding API/model per file
+            let emb: Vec<f32> = emb_str.split(',').map(|s| s.parse().unwrap_or(0.0)).collect();
+            let mut bytes = Vec::with_capacity(emb.len() * 4);
+            for f in &emb { bytes.extend_from_slice(&f.to_le_bytes()); }
+
+            if path.is_dir() {
+                for entry in fs::read_dir(path)? {
+                    let entry = entry?;
+                    let content = fs::read_to_string(entry.path())?;
+                    let meta = format!("{{\"path\": \"{}\"}}", entry.path().display());
+                    conn.execute(
+                        "INSERT INTO vectors (content, metadata, embedding) VALUES (?1, ?2, ?3)",
+                        params![content, meta, bytes],
+                    )?;
+                    println!("📖 Ingested: {}", entry.file_name().to_string_lossy());
+                }
+            }
         }
         "search" => {
             let query_str = &args[2];
-            let query_vec: Vec<f32> = query_str.split(',')
-                .map(|s| s.parse().unwrap())
-                .collect();
+            let query_vec: Vec<f32> = query_str.split(',').map(|s| s.parse().unwrap_or(0.0)).collect();
 
-            let mut stmt = conn.prepare("SELECT id, content, metadata, embedding FROM vectors")?;
+            let mut stmt = conn.prepare("SELECT content, metadata, embedding FROM vectors")?;
             let rows = stmt.query_map([], |row| {
-                let bytes: Vec<u8> = row.get(3)?;
-                let embedding: Vec<f32> = bytes
-                    .chunks_exact(4)
-                    .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-                    .collect();
-                Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?, embedding))
+                let bytes: Vec<u8> = row.get(2)?;
+                let embedding: Vec<f32> = bytes.chunks_exact(4)
+                    .map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, embedding))
             })?;
 
-            let mut results: Vec<_> = Vec::new();
+            let mut results = Vec::new();
             for row in rows {
-                let (content, metadata, embedding) = row?;
-                let score = cosine_similarity(&query_vec, &embedding);
-                results.push((content, metadata, score));
+                let (content, meta, emb) = row?;
+                results.push((content, meta, cosine_similarity(&query_vec, &emb)));
             }
-
             results.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
-            for (content, meta, score) in results.iter().take(5) {
-                println!("[{:.4}] {}: {}", score, content, meta);
+            
+            for (content, meta, score) in results.iter().take(3) {
+                println!("[{:.4}] Metadata: {}\nContent Preview: {}...\n", score, meta, &content[..content.len().min(100)]);
             }
         }
-        _ => println!("Unknown command"),
+        _ => println!("Unknown command."),
     }
 
     Ok(())
