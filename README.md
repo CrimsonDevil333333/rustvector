@@ -1,69 +1,59 @@
-# RustVector 🦀⚡ v0.3.0
+# RustVector 🦀⚡ v0.4.0
 
-**RustVector** is the absolute lightest, standalone vector database engine, designed specifically for high-performance edge computing on the **Raspberry Pi 5**.
-
-Built with pure Rust and SQLite, it provides a shared, persistent "semantic brain" for AI agents and CLI users with near-zero resource overhead.
-
-## ✨ Technical Spec
-- **Runtime RAM**: < 1MB (Idle/Search)
-- **Binary Size**: ~3MB (Release build with bundled SQLite)
-- **Persistence**: Global shared database at `~/.rustvector/vector.db`
-- **Language**: Pure Rust 🦀 (Zero Node/Python runtime dependency)
-- **Algorithm**: Native Cosine Similarity with normalization.
+**RustVector** is a high-performance, standalone vector database engine built for edge devices like the **Raspberry Pi 5**. It provides a shared, persistent "semantic brain" for AI agents with near-zero overhead.
 
 ## 🚀 Key Features
-- **🌍 System-Wide Access**: Install once, use from any directory, user, or agent session.
-- **📂 Recursive Ingestion**: Index entire project trees or note folders in one command.
-- **📊 Professional CLI**: Beautiful, structured help menus and terminal-friendly output.
-- **🕒 Knowledge Lineage**: Every indexed memory includes a high-precision RFC3339 timestamp.
-- **💾 Export & Purge**: Built-in tools for JSON backups and destructive brain resets.
+- **🧠 Multi-Provider Support**: Choose between local (**Ollama**) or cloud (**OpenAI**) embedding engines.
+- **🌍 System-Wide Access**: Install once, use from any directory or agent session.
+- **📂 Recursive Ingestion**: Index entire project trees in one command.
+- **📊 Professional CLI**: Beautiful, structured help menus via `clap`.
+- **🛠️ Configurable**: Persist your provider, model, and API keys locally.
 
-## 📦 One-Step Installation
-
+## 📦 Installation
 ```bash
-# Clone and Install Globally
 git clone https://github.com/CrimsonDevil333333/rustvector.git
 cd rustvector
 cargo install --path .
 ```
 
-## 🛠️ Usage Examples
+## 🛠️ Usage & Config
 
-### 1. Basic Memory Addition
-Add a single thought or fact to the shared brain:
+### 1. Configure your Provider
+By default, it uses local Ollama. You can switch to OpenAI or change models easily:
 ```bash
-rustvector add "The Raspberry Pi 5 is our production server." '{"category": "infra"}' "0.1,0.5,0.2"
+# Switch to OpenAI
+rustvector config --provider openai --model text-embedding-3-small --key your_api_key
+
+# Switch back to local Ollama
+rustvector config --provider ollama --model all-minilm
 ```
 
-### 2. Ingesting Your Project History
-Recursively index your entire memory or logs folder:
+### 2. Store Memories (Natural Language)
+No manual vector passing required. It handles the embedding automatically.
 ```bash
-rustvector ingest ~/my-agent-logs/memory "0.1,0.2,0.3,0.4,0.5"
+rustvector add "The Pi 5 is a production-grade server." '{"type": "infra"}'
 ```
 
 ### 3. Semantic Search
-Search your brain and limit results to the top 3 matches:
 ```bash
-rustvector search "0.1,0.5,0.2" 3
+rustvector search "What hardware are we using?" --limit 3
 ```
 
-### 4. System Health & Stats
-Check how many "memories" your agent has stored:
+### 4. Folder Ingestion
+```bash
+rustvector ingest /path/to/your/notes
+```
+
+### 5. Stats & Health
 ```bash
 rustvector stats
 ```
 
-### 5. Data Portability (Export)
-Backup your entire vector database to a human-readable JSON file:
-```bash
-rustvector export brain_backup.json
-```
-
-## 🤖 Why RustVector for Agents?
-Standard vector databases (Pinecone, Chroma, Milvus) are either cloud-dependent or heavy on local resources. **RustVector** is designed for the "Agent-on-a-Pi" era:
-1. **Shared Context**: Multiple independent agent sessions can use the same `rustvector` CLI to read/write to a shared persistent memory.
-2. **Speed**: Native execution means an agent can "recall" a memory in milliseconds without waiting for a runtime to spin up.
-3. **Robustness**: Survived multiple hard power-loss events during development on the Pi 5.
+## ✨ Technical Spec
+- **RAM Usage**: < 1MB
+- **Binary Size**: ~3MB
+- **Database**: SQLite (Raw BLOBs)
+- **Persistence**: `~/.rustvector/vector.db`
 
 ---
 *Built with 🦀 and 🦞 by Clawdy for the Satyaa Ecosystem.*
