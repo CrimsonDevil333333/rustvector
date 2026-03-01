@@ -11,7 +11,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Parser)]
 #[command(name = "rustvector")]
-#[command(version = "0.6.0")]
+#[command(version = "0.7.0")]
 #[command(author = "Satyaa & Clawdy")]
 #[command(about = "🦀 RustVector: High-performance semantic brain", long_about = None)]
 struct Cli {
@@ -21,16 +21,29 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Add an entry (auto-embeds text)
     Add { content: String, metadata: String },
+    /// Ingest a folder recursively (auto-converts non-MD via markitdown)
     Ingest { path: String },
+    /// Semantic search (text-based)
     Search { query: String, #[arg(default_value_t = 5)] limit: usize },
+    /// View stats
     Stats,
+    /// Wipe the brain
     Purge,
+    /// Quick configuration
     Config { 
         #[arg(short, long)] provider: Option<String>,
         #[arg(short, long)] model: Option<String>,
         #[arg(short, long)] key: Option<String>
     },
+    /// List all stored vectors
+    Ls { 
+        #[arg(short, long, default_value_t = 10)] limit: i64,
+        #[arg(short, long, default_value_t = 0)] offset: i64 
+    },
+    /// Remove a specific vector by ID
+    Rm { id: i32 },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -190,6 +203,23 @@ fn main() -> Result<()> {
             println!("📊 Brain: {} vectors | {} | {}", count, config.provider, config.model);
         }
         Commands::Purge => { conn.execute("DELETE FROM vectors", [])?; println!("🗑️ Wiped."); }
+        Commands::Ls { limit, offset } => {
+            let mut stmt = conn.prepare("SELECT id, metadata, timestamp, substr(content, 1, 50) FROM vectors LIMIT ?1 OFFSET ?2")?;
+            let rows = stmt.query_map(params![limit, offset], |row| {
+                Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?))
+            })?;
+            println!("{:<5} | {:<20} | {:<25} | {:<50}", "ID", "Timestamp", "Metadata", "Snippet");
+            println!("{}", "-".repeat(110));
+            for r in rows {
+                let (id, meta, ts, snip) = r?;
+                println!("{:<5} | {:<20} | {:<25} | {:<50}...", id, &ts[..19], meta, snip.replace('\n', " "));
+            }
+        },
+        Commands::Rm { id } => {
+            let deleted = conn.execute("DELETE FROM vectors WHERE id = ?1", params![id])?;
+            if deleted > 0 { println!("✅ Removed vector ID: {}", id); }
+            else { println!("❌ Vector ID {} not found.", id); }
+        }
     }
     Ok(())
 }
