@@ -21,17 +21,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Add an entry (auto-embeds text)
     Add { content: String, metadata: String },
-    /// Ingest a folder recursively (auto-converts non-MD via markitdown)
     Ingest { path: String },
-    /// Semantic search (text-based)
     Search { query: String, #[arg(default_value_t = 5)] limit: usize },
-    /// View stats
     Stats,
-    /// Wipe the brain
     Purge,
-    /// Quick configuration
     Config { 
         #[arg(short, long)] provider: Option<String>,
         #[arg(short, long)] model: Option<String>,
@@ -105,6 +99,15 @@ fn get_embedding(text: &str, config: &AppConfig) -> Result<Vec<f32>> {
     }
 }
 
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() { return 0.0; }
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 { return 0.0; }
+    dot / (norm_a * norm_b)
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = load_config();
@@ -122,7 +125,7 @@ fn main() -> Result<()> {
             if let Some(m) = model { new_config.model = m.clone(); }
             if let Some(k) = key { new_config.api_key = Some(k.clone()); }
             save_config(&new_config)?;
-            println!("✅ Config saved to ~/.rustvector/config.json");
+            println!("✅ Config saved.");
         }
         Commands::Add { content, metadata } => {
             let emb = get_embedding(content, &config)?;
@@ -141,49 +144,50 @@ fn main() -> Result<()> {
             for entry in files {
                 let p = entry.path();
                 pb.set_message(format!("Indexing: {}", entry.file_name().to_string_lossy()));
-                
                 let content = if p.extension().map_or(false, |ext| ext == "md" || ext == "txt") {
                     fs::read_to_string(p).ok()
                 } else {
-                    let output = Command::new("markitdown").arg(p).output();
-                    output.ok().and_then(|o| String::from_utf8(o.stdout).ok())
+                    Command::new("markitdown").arg(p).output().ok()
+                        .and_then(|o| String::from_utf8(o.stdout).ok())
                 };
-
                 if let Some(txt) = content {
-                    if txt.len() > 0 && txt.len() < 200000 {
+                    if !txt.is_empty() && txt.len() < 200000 {
                         if let Ok(emb) = get_embedding(&txt, &config) {
-                            let mut bytes = Vec::with_capacity(emb.len() * 4);
-                            for f in emb { bytes.extend_from_slice(&f.to_le_bytes()); }
+                            let mut b = Vec::with_capacity(emb.len() * 4);
+                            for f in emb { b.extend_from_slice(&f.to_le_bytes()); }
                             let _ = conn.execute("INSERT INTO vectors (content, metadata, embedding, timestamp) VALUES (?1, ?2, ?3, ?4)", 
-                                params![txt, format!("{{\"path\": \"{}\"}}", p.display()), bytes, Utc::now().to_rfc3339()]);
+                                params![txt, format!("{{\"path\": \"{}\"}}", p.display()), b, Utc::now().to_rfc3339()]);
                         }
                     }
                 }
                 pb.inc(1);
             }
-            pb.finish_with_message("✅ Ingestion complete");
+            pb.finish_with_message("✅ Done");
         }
         Commands::Search { query, limit } => {
-            let query_vec = get_embedding(query, &config)?;
-            let mut stmt = conn.prepare("SELECT content, metadata, embedding, timestamp FROM vectors")?;
+            let q_vec = get_embedding(query, &config)?;
+            let mut stmt = conn.prepare("SELECT content, metadata, embedding FROM vectors")?;
             let rows = stmt.query_map([], |row| {
                 let bytes: Vec<u8> = row.get(2)?;
-                let embedding: Vec<f32> = bytes.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, embedding, row.get::<_, String>(3)?))
+                let emb: Vec<f32> = bytes.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+                let content: String = row.get(0)?;
+                let meta: String = row.get(1)?;
+                Ok((content, meta, emb))
             })?;
             let mut results = Vec::new();
-            for row in rows {
-                let (content, meta, emb, ts) = row?;
-                results.push((content, meta, cosine_similarity(&query_vec, &emb), ts));
+            for r in rows {
+                let (c, m, e) = r?;
+                results.push((c, m, cosine_similarity(&q_vec, &e)));
             }
             results.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-            for (content, meta, score, _) in results.iter().take(*limit) {
-                println!("[{:.2}%] {}\n{}\n", score * 100.0, meta, &content[..content.len().min(120)].replace('\n', " "));
+            for (c, m, s) in results.iter().take(*limit) {
+                let preview = if c.len() > 120 { &c[..120] } else { &c };
+                println!("[{:.2}%] {}\n{}\n", s * 100.0, m, preview.replace('\n', " "));
             }
         }
         Commands::Stats => {
             let count: i64 = conn.query_row("SELECT COUNT(*) FROM vectors", [], |r| r.get(0))?;
-            println!("📊 Brain: {} vectors | Provider: {} | Model: {}", count, config.provider, config.model);
+            println!("📊 Brain: {} vectors | {} | {}", count, config.provider, config.model);
         }
         Commands::Purge => { conn.execute("DELETE FROM vectors", [])?; println!("🗑️ Wiped."); }
     }
