@@ -11,9 +11,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Parser)]
 #[command(name = "rustvector")]
-#[command(version = "0.8.0")]
+#[command(version = "0.8.1")]
 #[command(author = "Satyaa & Clawdy")]
-#[command(about = "🦀 RustVector: Semantic brain with delta indexing", long_about = None)]
+#[command(about = "🦀 RustVector: High-performance semantic brain with delta indexing", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -125,18 +125,28 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = load_config();
     let home = env::var("HOME").unwrap_or_else(|_| ".".into());
-    let db_path = format!("{}/.rustvector/vector.db", home);
-    fs::create_dir_all(format!("{}/.rustvector", home))?;
+    let db_dir = format!("{}/.rustvector", home);
+    fs::create_dir_all(&db_dir)?;
+    let db_path = format!("{}/vector.db", db_dir);
     let conn = Connection::open(&db_path)?;
 
+    // Ensure schema is up to date
     conn.execute("CREATE TABLE IF NOT EXISTS vectors (
         id INTEGER PRIMARY KEY, 
         content TEXT NOT NULL, 
         metadata TEXT, 
         embedding BLOB NOT NULL, 
-        timestamp TEXT NOT NULL,
-        file_hash TEXT
+        timestamp TEXT NOT NULL
     )", [])?;
+
+    // Delta Migration: Check if file_hash exists
+    let has_hash_col: bool = conn.prepare("PRAGMA table_info(vectors)")?
+        .query_map([], |row| Ok(row.get::<_, String>(1)?))?
+        .any(|name| name.map_or(false, |n| n == "file_hash"));
+
+    if !has_hash_col {
+        conn.execute("ALTER TABLE vectors ADD COLUMN file_hash TEXT", [])?;
+    }
 
     match &cli.command {
         Commands::Config { provider, model, key } => {
@@ -169,15 +179,15 @@ fn main() -> Result<()> {
                 let file_name = entry.file_name().to_string_lossy().into_owned();
                 pb.set_message(format!("Checking: {}", file_name));
                 
-                let metadata = fs::metadata(p)?;
-                let current_hash = format!("{}-{:?}", metadata.len(), metadata.modified()?);
+                let file_meta = fs::metadata(p)?;
+                let current_hash = format!("{}-{:?}", file_meta.len(), file_meta.modified()?);
                 let path_str = p.to_string_lossy().into_owned();
                 
                 let already_exists: bool = conn.query_row(
                     "SELECT EXISTS(SELECT 1 FROM vectors WHERE file_hash = ?1 AND metadata LIKE ?2)",
                     params![current_hash, format!("%{}%", path_str)],
                     |row| row.get(0)
-                )?;
+                ).unwrap_or(false);
 
                 if already_exists {
                     skipped += 1;
